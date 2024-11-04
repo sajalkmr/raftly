@@ -1,6 +1,7 @@
 package main.java.com.raftly;
 
 import java.util.List;
+import java.util.ArrayList;
 
 public class RaftNode{
     private int id;
@@ -14,9 +15,9 @@ public class RaftNode{
     public RaftNode(int id, List<RaftNode> cluster){
         this.id = id;
         this.currentTerm = 0;
-        this.votedFor = 0;
+        this.votedFor = -1;
         this.log = new Log();
-        //this.state = State.FOLLOWER;
+        this.state = State.FOLLOWER;
         this.cluster = cluster;
 
     }
@@ -26,19 +27,29 @@ public class RaftNode{
     }
 
     public void handleRPC(){
-        //
+        if(state == State.LEADER){
+            // handle leader RPC
+        }
+        else if(state == State.FOLLOWER){
+            // handle follower RPC
+        }
+        else if(state == State.CANDIDATE){
+            // handle candidate RPC
+        }
     }
     
     public void becomeLeader(){
-        //
+        this.state = State.LEADER;
+
+        
     }
 
     public void becomeFollower(){
-        //
+        this.state = State.FOLLOWER;
     }
 
     public void becomeCandidate(){
-        //
+        this.state = State.CANDIDATE;
     }
 
 
@@ -48,7 +59,14 @@ public class RaftNode{
     }
 
     private static List<RaftNode> initCluster(){
-        //
+        private List<RaftNode> cluster = new ArrayList<RaftNode>();
+        for(int i = 0; i < 6; i++){
+            cluster.add(new RaftNode(i, cluster));
+        }
+        return cluster;
+
+
+        
     }
 
     private enum State{
