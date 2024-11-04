@@ -17,4 +17,12 @@ public class Log {
     public List<LogEntry> getEntries() {
         return entries;
     }
+
+    public void clear() {
+        entries.clear();
+    }
+
+    public LogEntry getEntry(int index) {
+        return entries.get(index);
+    }
 }

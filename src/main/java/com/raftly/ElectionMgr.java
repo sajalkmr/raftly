@@ -4,20 +4,41 @@ import java.util.List;
 
 public class ElectionMgr {
     private List<RaftNode> cluster;
+    private int currentTerm;
+    private int votesReceived;
+    private int votesNeeded;
+    private RaftNode node;
 
-    public ElectionMgr(List<RaftNode> cluster) {
+    public ElectionMgr(RaftNode node, List<RaftNode> cluster) {
         this.cluster = cluster;
+        this.node = node;
+        this.currentTerm = 0;
+        this.votesReceived = 0;
+        this.votesNeeded = (cluster.size() / 2)+1;
     }
+   
 
     public void startElection() {
-        // start an election
-        // Increment current term, vote for self, send RequestVote RPCs
+        currentTerm++;
+        votesReceived = 1;
+        node.setVotedFor(node.getId());
+
+        for (RaftNode peer : cluster) {
+            if (peer.getId() != node.getId()) {
+                peer.requestVote(node.getId(), currentTerm);
+            }
+        }
     }
 
     public void receiveVote(int voterId) {
-        //  handle votes
-        // Count votes and determine if a leader can be elected
+        votesReceived++;
+        if (votesReceived >= cluster.size()) {
+            node.becomeLeader();
+        }
+        
     }
+
+
 }
 
 
