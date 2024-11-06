@@ -87,6 +87,38 @@ public class RaftNode {
         // send vote
     }
 
+    public void sendLogEntries() {
+        for (RaftNode peer : cluster) {
+            if (peer.getId() != this.id) {
+                peer.receiveLogEntries(this.log.getEntries());
+            }
+        }
+    }
+    
+    public void receiveLogEntries(List<LogEntry> entries) {
+        for (LogEntry entry : entries) {
+            log.append(entry);
+        }
+    }
+
+    public void appendEntries(int leaderId, int term, List<LogEntry> entries) {
+        if (term < currentTerm) {
+            // Reply false if term < currentTerm
+            return;
+        }
+        currentTerm = term; // Update current term
+        // Append the entries to the log
+        for (LogEntry entry : entries) {
+            log.append(entry);
+        }
+        
+    }
+
+
+
+
+
+
     private enum State {
         LEADER,
         FOLLOWER,

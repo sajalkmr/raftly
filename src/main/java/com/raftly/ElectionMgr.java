@@ -28,6 +28,8 @@ public class ElectionMgr {
                 peer.requestVote(node.getId(), currentTerm);
             }
         }
+
+        node.sendLogEntries();
     }
 
     public void receiveVote(int voterId) {
