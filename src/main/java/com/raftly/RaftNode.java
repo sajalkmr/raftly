@@ -45,6 +45,7 @@ public class RaftNode {
 
     public void becomeLeader() {
         this.state = State.LEADER;
+        sendLogEntries();
     }
 
     public void becomeFollower() {
@@ -68,8 +69,8 @@ public class RaftNode {
         for (int i = 0; i < 6; i++) {
             cluster.add(new RaftNode(i, cluster));
         }
-        
-        
+        return cluster;
+
     }
 
     public void requestVote(int candidateId, int term) {
@@ -94,7 +95,7 @@ public class RaftNode {
             }
         }
     }
-    
+
     public void receiveLogEntries(List<LogEntry> entries) {
         for (LogEntry entry : entries) {
             log.append(entry);
@@ -111,13 +112,24 @@ public class RaftNode {
         for (LogEntry entry : entries) {
             log.append(entry);
         }
-        
+
     }
 
+    public void handleVoteRequest(int candidateId, int term) {
+        if (term > currentTerm) {
+            becomeFollower();
+            setVotedFor(candidateId);
+            // Send vote response
+        }
+    }
 
-
-
-
+    public void handleLogEntries(List<LogEntry> entries) {
+        for (LogEntry entry : entries) {
+            log.append(entry);
+        }
+        // Send acknowledgment back to the leader
+        //sendAckToLeader();
+    }
 
     private enum State {
         LEADER,
