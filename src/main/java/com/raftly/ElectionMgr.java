@@ -38,7 +38,7 @@ public class ElectionMgr {
                     node.becomeFollower();
                 }
             }
-        }, ELECTION_TIMEOUT);
+        }, ELECTION_TIMEOUT+ (long)(Math.random() * 1000));
     }
 
     public void receiveVote(int voterId) {
@@ -48,5 +48,12 @@ public class ElectionMgr {
         }
 
     }
+
+    public void receiveAck(int followerId) {
+        //
+        System.out.println("Received acknowledgment from follower " + followerId);
+    }
+
+
 
 }

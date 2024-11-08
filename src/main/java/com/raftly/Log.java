@@ -25,4 +25,8 @@ public class Log {
     public LogEntry getEntry(int index) {
         return entries.get(index);
     }
+
+    public void takeSnapshot() {
+        System.out.println("Snapshot taken of log entries.");
+    }
 }
