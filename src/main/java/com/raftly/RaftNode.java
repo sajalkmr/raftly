@@ -10,6 +10,9 @@ public class RaftNode {
     private Log log;
     private State state;
     private List<RaftNode> cluster;
+    private StateMachine stateMachine;
+
+
 
     public RaftNode(int id, List<RaftNode> cluster) {
         this.id = id;
@@ -18,6 +21,7 @@ public class RaftNode {
         this.log = new Log();
         this.state = State.FOLLOWER;
         this.cluster = cluster;
+        this.stateMachine = new StateMachine();
     }
 
     public void setVotedFor(int candidateId) {
@@ -126,6 +130,7 @@ public class RaftNode {
     public void handleLogEntries(List<LogEntry> entries) {
         for (LogEntry entry : entries) {
             log.append(entry);
+            stateMachine.applyCommand(entry.getCommand(), "someValue");
         }
         // Send acknowledgment back to the leader
         //sendAckToLeader();
