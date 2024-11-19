@@ -1,4 +1,4 @@
-package main.java.com.raftly;
+package com.raftly;
 
 import java.util.List;
 import java.util.TimerTask;
@@ -53,7 +53,5 @@ public class ElectionMgr {
         //
         System.out.println("Received acknowledgment from follower " + followerId);
     }
-
-
 
 }

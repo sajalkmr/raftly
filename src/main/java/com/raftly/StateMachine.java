@@ -1,4 +1,4 @@
-package main.java.com.raftly;
+package com.raftly;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -16,4 +16,5 @@ public class StateMachine {
 
     public void clearState() {
         state.clear();
+    }
 }

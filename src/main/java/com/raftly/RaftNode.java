@@ -1,4 +1,4 @@
-package main.java.com.raftly;
+package com.raftly;
 
 import java.util.List;
 import java.util.ArrayList;
@@ -283,7 +283,25 @@ public class RaftNode {
         }
     }
 
-}
+    public int getCurrentTerm() {
+        return currentTerm;
+    }
+
+    public void setCurrentTerm(int term) {
+        this.currentTerm = term;
+    }
+
+    public int getCommitIndex() {
+        return commitIndex;
+    }
+
+    public void setCommitIndex(int index) {
+        this.commitIndex = index;
+    }
+
+    public Log getLog() {
+        return log;
+    }
 
     public void setVotedFor(int candidateId) {
         this.votedFor = candidateId;

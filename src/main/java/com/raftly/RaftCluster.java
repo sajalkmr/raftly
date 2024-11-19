@@ -1,4 +1,4 @@
-package main.java.com.raftly;
+package com.raftly;
 
 import java.util.List;
 
