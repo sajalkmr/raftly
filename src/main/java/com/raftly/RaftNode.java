@@ -51,12 +51,21 @@ public class RaftNode {
     }
 
     public void start() {
+        if (!isRunning.get()) {
+            return;
+        }
+        
+        // Initialize indices
+        for (int i = 0; i < cluster.size(); i++) {
+            nextIndex[i] = log.getLastIndex() + 1;
+            matchIndex[i] = 0;
+        }
+
         // Start election timeout timer
-        // resetElectionTimeout();
+        resetElectionTimeout();
 
         // Start commit checker
-        // scheduler.scheduleAtFixedRate(this::checkCommits, 0, 100,
-        // TimeUnit.MILLISECONDS);
+        scheduler.scheduleAtFixedRate(this::checkCommits, 0, 100, TimeUnit.MILLISECONDS);
     }
 
     private void resetElectionTimeout() {
@@ -155,28 +164,36 @@ public class RaftNode {
         for (RaftNode peer : cluster) {
             if (peer.getId() != this.id) {
                 int prevLogIndex = nextIndex[peer.getId()] - 1;
-                int prevLogTerm = log.getTermAt(prevLogIndex);
-                List<LogEntry> entries = log.getEntriesFrom(nextIndex[peer.getId()]);
-
-                AppendEntriesResult result = peer.appendEntries(
-                        currentTerm,
-                        id,
-                        prevLogIndex,
-                        prevLogTerm,
-                        entries,
-                        commitIndex);
-
-                if (result.isSuccess()) {
-                    if (!entries.isEmpty()) {
-                        nextIndex[peer.getId()] += entries.size();
-                        matchIndex[peer.getId()] = nextIndex[peer.getId()] - 1;
-                        updateCommitIndex();
+                int prevLogTerm = 0;
+                
+                try {
+                    if (prevLogIndex >= 0) {
+                        prevLogTerm = log.getTermAt(prevLogIndex);
                     }
-                } else {
-                    // If AppendEntries fails /log inconsistency
-                    if (nextIndex[peer.getId()] > 0) {
-                        nextIndex[peer.getId()]--;
+                    List<LogEntry> entries = log.getEntriesFrom(nextIndex[peer.getId()]);
+
+                    AppendEntriesResult result = peer.appendEntries(
+                            currentTerm,
+                            id,
+                            prevLogIndex,
+                            prevLogTerm,
+                            entries,
+                            commitIndex);
+
+                    if (result.isSuccess()) {
+                        if (!entries.isEmpty()) {
+                            nextIndex[peer.getId()] += entries.size();
+                            matchIndex[peer.getId()] = nextIndex[peer.getId()] - 1;
+                            updateCommitIndex();
+                        }
+                    } else {
+                        // If AppendEntries fails due to log inconsistency
+                        if (nextIndex[peer.getId()] > 0) {
+                            nextIndex[peer.getId()]--;
+                        }
                     }
+                } catch (Exception e) {
+                    System.err.println("Error sending heartbeat to peer " + peer.getId() + ": " + e.getMessage());
                 }
             }
         }
@@ -262,7 +279,15 @@ public class RaftNode {
 
     public void stop() {
         isRunning.set(false);
-        scheduler.shutdown();
+        try {
+            scheduler.shutdown();
+            if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static class AppendEntriesResult {

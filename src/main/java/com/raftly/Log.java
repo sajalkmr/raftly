@@ -1,5 +1,6 @@
 package com.raftly;
 
+import com.raftly.LogEntry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -19,6 +20,10 @@ public class Log implements Serializable {
     }
 
     public void append(LogEntry entry) {
+        if (entry == null) {
+            throw new IllegalArgumentException("Entry cannot be null");
+        }
+        
         lock.writeLock().lock();
         try {
             entries.add(entry);
@@ -30,6 +35,13 @@ public class Log implements Serializable {
     }
 
     public void appendEntries(List<LogEntry> newEntries, int prevLogIndex) {
+        if (newEntries == null) {
+            throw new IllegalArgumentException("newEntries cannot be null");
+        }
+        if (prevLogIndex < -1) {
+            throw new IllegalArgumentException("prevLogIndex cannot be less than -1");
+        }
+        
         lock.writeLock().lock();
         try {
             // Remove any conflicting entries
@@ -72,6 +84,9 @@ public class Log implements Serializable {
     public LogEntry getEntry(int index) {
         lock.readLock().lock();
         try {
+            if (index < 0 || index >= entries.size()) {
+                throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + entries.size());
+            }
             return entries.get(index);
         } finally {
             lock.readLock().unlock();
@@ -86,8 +101,31 @@ public class Log implements Serializable {
         return lastLogTerm;
     }
 
+    public int getTermAt(int index) {
+        lock.readLock().lock();
+        try {
+            if (index < 0 || index >= entries.size()) {
+                return 0;
+            }
+            return entries.get(index).term();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    public List<LogEntry> getEntriesFrom(int index) {
+        lock.readLock().lock();
+        try {
+            if (index >= entries.size()) {
+                return new ArrayList<>();
+            }
+            return new ArrayList<>(entries.subList(index, entries.size()));
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     public void takeSnapshot() {
-        // TODO: Implement log compaction
-        System.out.println("Snapshot taken of log entries.");
+        throw new UnsupportedOperationException("Log compaction not yet implemented");
     }
 }
