@@ -13,13 +13,32 @@ public record LogEntry(
         if (command == null) throw new IllegalArgumentException("Command cannot be null");
     }
     
-    public static record Command(
-        String operation,
-        byte[] data
-    ) implements Serializable {
-        public Command {
-            if (operation == null) throw new IllegalArgumentException("Operation cannot be null");
-            if (data == null) throw new IllegalArgumentException("Data cannot be null");
+    public static class Command {
+        private final String operation;
+        private final String key;
+        private final String value;
+
+        public Command(String operation, String key, String value) {
+            this.operation = operation;
+            this.key = key;
+            this.value = value;
+        }
+
+        public String operation() {
+            return operation;
+        }
+
+        public String key() {
+            return key;
+        }
+
+        public String value() {
+            return value;
+        }
+
+        @Override
+        public String toString() {
+            return operation + " " + key + "=" + value;
         }
     }
 }

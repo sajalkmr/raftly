@@ -1,12 +1,28 @@
 package com.raftly;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class RaftCluster {
-    private List<RaftNode> nodes;
+    private final List<RaftNode> nodes;
+
+    public RaftCluster() {
+        this.nodes = new ArrayList<>();
+    }
 
     public RaftCluster(List<RaftNode> nodes) {
-        this.nodes = nodes;
+        this.nodes = new ArrayList<>(nodes);
+        for (RaftNode node : nodes) {
+            node.setCluster(this);
+        }
+    }
+
+    public void addNode(RaftNode node) {
+        nodes.add(node);
+    }
+
+    public List<RaftNode> getNodes() {
+        return nodes;
     }
 
     public void startCluster() {

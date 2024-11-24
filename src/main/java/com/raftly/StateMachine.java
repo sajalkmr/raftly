@@ -3,35 +3,45 @@ package com.raftly;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.HashMap;
 
 public class StateMachine {
-    private final Map<String, String> state = new ConcurrentHashMap<>();
+    private final Map<String, String> kvStore = new ConcurrentHashMap<>();
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
-    public void applyCommand(String key, String value) {
+    public void apply(LogEntry.Command command) {
         lock.writeLock().lock();
         try {
-            state.put(key, value);
+            switch (command.operation()) {
+                case "SET":
+                    kvStore.put(command.key(), command.value());
+                    break;
+                case "DELETE":
+                    kvStore.remove(command.key());
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown operation: " + command.operation());
+            }
         } finally {
             lock.writeLock().unlock();
         }
     }
 
-    public String getValue(String key) {
+    public String get(String key) {
         lock.readLock().lock();
         try {
-            return state.get(key);
+            return kvStore.get(key);
         } finally {
             lock.readLock().unlock();
         }
     }
 
-    public void clearState() {
-        lock.writeLock().lock();
+    public Map<String, String> getSnapshot() {
+        lock.readLock().lock();
         try {
-            state.clear();
+            return new HashMap<>(kvStore);
         } finally {
-            lock.writeLock().unlock();
+            lock.readLock().unlock();
         }
     }
 }

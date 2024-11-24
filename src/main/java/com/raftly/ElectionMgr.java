@@ -7,7 +7,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class ElectionMgr {
-    private static final long ELECTION_TIMEOUT = 5000; // 5 seconds
+    private static final long ELECTION_TIMEOUT = 5000;
     private final RaftNode node;
     private final List<RaftNode> cluster;
     private final AtomicInteger votesReceived;
@@ -26,16 +26,16 @@ public class ElectionMgr {
 
     public void startElection() {
         if (!electionLock.tryLock()) {
-            return; // Another election is in progress
+            return; 
         }
         
         try {
             currentTerm++;
-            votesReceived.set(1); // Vote for self
+            votesReceived.set(1); 
             node.setVotedFor(node.getId());
             node.setCurrentTerm(currentTerm);
 
-            // Request votes from other nodes
+            // Request votes
             for (RaftNode peer : cluster) {
                 if (peer.getId() != node.getId()) {
                     peer.requestVote(node.getId(), currentTerm);
@@ -71,7 +71,6 @@ public class ElectionMgr {
     }
 
     public void receiveAck(int followerId) {
-        // Handle acknowledgment from follower
         System.out.println("Received acknowledgment from follower " + followerId);
     }
 }
