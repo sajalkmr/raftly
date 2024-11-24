@@ -58,18 +58,31 @@ public class RaftDemo {
         // Test operations
         System.out.println("Testing key-value operations:");
         
+        System.out.println("\nTest 1: Basic Set/Get");
         System.out.println("Setting key1=value1");
         leader.appendCommand(new LogEntry.Command("SET", "key1", "value1"));
+        Thread.sleep(500);
         
-        // Wait for replication (1 second)
-        Thread.sleep(1000);
+        System.out.println("\nTest 2: Update Existing Key");
+        System.out.println("Updating key1=newvalue");
+        leader.appendCommand(new LogEntry.Command("SET", "key1", "newvalue"));
+        Thread.sleep(500);
+        
+        System.out.println("\nTest 3: Multiple Keys");
+        System.out.println("Setting key2=value2, key3=value3");
+        leader.appendCommand(new LogEntry.Command("SET", "key2", "value2"));
+        leader.appendCommand(new LogEntry.Command("SET", "key3", "value3"));
+        Thread.sleep(500);
         
         // Read from all nodes
+        System.out.println("\nVerifying consistency across all nodes:");
         for (RaftNode node : nodes) {
-            String value = node.getStateMachine().get("key1");
-            System.out.println("Node " + node.getId() + " reads key1=" + value);
-            System.out.println("Node " + node.getId() + " commit index: " + node.getCommitIndex());
-            System.out.println("Node " + node.getId() + " log size: " + node.getLog().getLastLogIndex() + 1);
+            System.out.println("\nNode " + node.getId() + " state:");
+            System.out.println("key1=" + node.getStateMachine().get("key1"));
+            System.out.println("key2=" + node.getStateMachine().get("key2"));
+            System.out.println("key3=" + node.getStateMachine().get("key3"));
+            System.out.println("Commit index: " + node.getCommitIndex());
+            System.out.println("Log size: " + (node.getLog().getLastLogIndex() + 1));
         }
 
         // Shutdown the cluster
