@@ -38,7 +38,7 @@ public class ElectionMgr {
             // Request votes
             for (RaftNode peer : cluster) {
                 if (peer.getId() != node.getId()) {
-                    peer.requestVote(node.getId(), currentTerm);
+                    peer.requestVote(node.getId(), currentTerm, node.getLog().getLastLogIndex(), node.getLog().getLastLogTerm());
                 }
             }
 

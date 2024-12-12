@@ -32,7 +32,7 @@ class RaftNodeTest {
         when(mockCluster.getNodes()).thenReturn(mockNodes);
         when(mockLog.getLastLogIndex()).thenReturn(-1);
         
-        node = new RaftNode(1, mockCluster, mockStateMachine, mockLog);
+        node = new RaftNode(1, mockCluster, mockStateMachine, mockLog, null);
     }
 
     @Test

@@ -6,8 +6,18 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.HashMap;
 
 public class StateMachine {
-    private final Map<String, String> kvStore = new ConcurrentHashMap<>();
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    private final ConcurrentHashMap<String, String> kvStore;
+    private final ReentrantReadWriteLock lock;
+
+    public StateMachine() {
+        this.kvStore = new ConcurrentHashMap<>();
+        this.lock = new ReentrantReadWriteLock();
+    }
+
+    public StateMachine(Map<String, String> initialState) {
+        this.kvStore = new ConcurrentHashMap<>(initialState);
+        this.lock = new ReentrantReadWriteLock();
+    }
 
     public void apply(LogEntry.Command command) {
         lock.writeLock().lock();
@@ -42,6 +52,16 @@ public class StateMachine {
             return new HashMap<>(kvStore);
         } finally {
             lock.readLock().unlock();
+        }
+    }
+
+    public void restoreFromSnapshot(Map<String, String> snapshot) {
+        lock.writeLock().lock();
+        try {
+            kvStore.clear();
+            kvStore.putAll(snapshot);
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 }

@@ -13,7 +13,8 @@ public record LogEntry(
         if (command == null) throw new IllegalArgumentException("Command cannot be null");
     }
     
-    public static class Command {
+    public static class Command implements Serializable {
+        private static final long serialVersionUID = 1L;
         private final String operation;
         private final String key;
         private final String value;
@@ -34,11 +35,6 @@ public record LogEntry(
 
         public String value() {
             return value;
-        }
-
-        @Override
-        public String toString() {
-            return operation + " " + key + "=" + value;
         }
     }
 }

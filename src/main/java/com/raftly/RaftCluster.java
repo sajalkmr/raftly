@@ -19,6 +19,19 @@ public class RaftCluster {
 
     public void addNode(RaftNode node) {
         nodes.add(node);
+        for (RaftNode existingNode : nodes) {
+            if (existingNode != node) {
+                existingNode.updateClusterConfiguration(this);
+            }
+        }
+        node.updateClusterConfiguration(this);
+    }
+
+    public void removeNode(RaftNode node) {
+        nodes.remove(node);
+        for (RaftNode remainingNode : nodes) {
+            remainingNode.updateClusterConfiguration(this);
+        }
     }
 
     public List<RaftNode> getNodes() {

@@ -1,75 +1,147 @@
 package com.raftly;
 
-import java.util.List;
-import java.util.ArrayList;
-import java.util.Random;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import com.raftly.persistence.PersistentState;
+import com.raftly.persistence.StateMachineSnapshot;
+import com.raftly.persistence.Storage;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ScheduledFuture;
-import com.raftly.LogEntry;
-import com.raftly.RaftCluster;
-import com.raftly.StateMachine;
 
 public class RaftNode {
-    private int id;
+    private final String nodeId;
     private volatile int currentTerm;
-    private volatile int votedFor;
-    private Log log;
+    private volatile String votedFor;
+    private final Log log;
+    private final StateMachine stateMachine;
+    private final Storage storage;
+    private int commitIndex;
+    private int lastApplied;
+    private final Map<String, Integer> nextIndex;
+    private final Map<String, Integer> matchIndex;
     private volatile State state;
-    private List<RaftNode> cluster;
-    private StateMachine stateMachine;
-
-    private volatile int commitIndex;
-    private volatile int lastApplied;
-    private volatile int[] nextIndex;
-    private volatile int[] matchIndex;
     private final ScheduledExecutorService scheduler;
     private final Random random;
-    private volatile int leaderId;
-    private final AtomicBoolean isRunning;
-    private final ReentrantLock lock;
+    private volatile String leaderId;
+    private volatile boolean isRunning;
+    private final Object stateLock = new Object();
+    private ScheduledFuture<?> electionTimeout;
     private ScheduledFuture<?> heartbeatTask;
-    private ScheduledFuture<?> electionTimeoutTask;
+    private static final int SCHEDULER_POOL_SIZE = 4;
+    private static final long BASE_ELECTION_TIMEOUT = 150; // milliseconds
+    private static final long ELECTION_TIMEOUT_RANGE = 150; // milliseconds
+    private static final long COMMIT_CHECK_INTERVAL = 50; // milliseconds
+    private static final long HEARTBEAT_INTERVAL = 50; // milliseconds
+    private RaftCluster cluster;
 
-    private static final int BASE_ELECTION_TIMEOUT = 1500;
-    private static final int ELECTION_TIMEOUT_RANGE = 750;
-    private static final int HEARTBEAT_INTERVAL = 1000;
-    private static final int COMMIT_CHECK_INTERVAL = 500;
+    public enum State {
+        FOLLOWER,
+        CANDIDATE,
+        LEADER
+    }
 
-    public RaftNode(int id, RaftCluster cluster, StateMachine stateMachine, Log log) {
-        this.id = id;
-        this.currentTerm = 0;
-        this.votedFor = -1;
-        this.log = log;
-        this.state = State.FOLLOWER;
-        this.cluster = cluster != null ? cluster.getNodes() : new ArrayList<>();
+    public RaftNode(String nodeId, StateMachine stateMachine, Storage storage) {
+        this.nodeId = nodeId;
         this.stateMachine = stateMachine;
-
+        this.storage = storage;
+        this.log = new LogImpl();
+        this.state = State.FOLLOWER;
+        this.currentTerm = 0;
+        this.votedFor = null;
+        this.leaderId = null;
+        this.isRunning = true;
+        this.scheduler = Executors.newScheduledThreadPool(2);
+        this.nextIndex = new ConcurrentHashMap<>();
+        this.matchIndex = new ConcurrentHashMap<>();
+        this.random = new Random();
+        this.cluster = null;
+        
+        // Load persisted state
+        loadPersistedState();
+        
         this.commitIndex = -1;
         this.lastApplied = -1;
-        this.nextIndex = new int[cluster != null ? cluster.getNodes().size() : 0];
-        this.matchIndex = new int[cluster != null ? cluster.getNodes().size() : 0];
         
         // Init nextIndex for all servers
         int lastLogIndex = log.getLastLogIndex();
-        for (int i = 0; i < (cluster != null ? cluster.getNodes().size() : 0); i++) {
-            nextIndex[i] = lastLogIndex + 1;
-            matchIndex[i] = 0;
+        for (RaftNode peer : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+            nextIndex.put(peer.getId(), lastLogIndex + 1);
+            matchIndex.put(peer.getId(), 0);
         }
-        
-        this.scheduler = Executors.newScheduledThreadPool(2);
-        this.random = new Random();
-        this.leaderId = -1;
-        this.isRunning = new AtomicBoolean(true);
-        this.lock = new ReentrantLock();
+    }
+
+    public String getId() {
+        return nodeId;
+    }
+
+    public int getCurrentTerm() {
+        return currentTerm;
+    }
+
+    public void setCurrentTerm(int term) {
+        this.currentTerm = term;
+        persistState();
+    }
+
+    public String getVotedFor() {
+        return votedFor;
+    }
+
+    public void setVotedFor(String votedFor) {
+        this.votedFor = votedFor;
+        persistState();
+    }
+
+    public Log getLog() {
+        return log;
+    }
+
+    public int getCommitIndex() {
+        return commitIndex;
+    }
+
+    public void setCommitIndex(int index) {
+        this.commitIndex = index;
+    }
+
+    private void persistState() {
+        if (storage != null) {
+            try {
+                StateMachineSnapshot snapshot = new StateMachineSnapshot(stateMachine.getSnapshot());
+                storage.save(new PersistentState(currentTerm, votedFor, log, snapshot));
+            } catch (Exception e) {
+                System.err.println("Failed to persist state: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void loadPersistedState() {
+        if (storage != null) {
+            try {
+                PersistentState state = storage.load();
+                if (state != null) {
+                    this.currentTerm = state.getCurrentTerm();
+                    this.votedFor = state.getVotedFor();
+                    this.log = state.getLog();
+                    
+                    StateMachineSnapshot snapshot = state.getStateMachineSnapshot();
+                    if (snapshot != null) {
+                        this.stateMachine.restoreFromSnapshot(snapshot.getState());
+                    }
+                    
+                    // Apply any entries that came after the snapshot
+                    applyCommittedEntries();
+                }
+            } catch (Exception e) {
+                System.err.println("Failed to load persistent state: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
     }
 
     public void start() {
-        if (!isRunning.get()) {
+        if (!isRunning) {
             return;
         }
         
@@ -77,81 +149,113 @@ public class RaftNode {
         resetElectionTimeout();
 
         // Start commit checker with less frequent checks
-        scheduler.scheduleAtFixedRate(() -> {
-            if (isRunning.get()) {
-                checkCommits();
-            }
-        }, 0, COMMIT_CHECK_INTERVAL, TimeUnit.MILLISECONDS);
+        electionTimeout = scheduler.scheduleAtFixedRate(
+            () -> {
+                if (isRunning) {
+                    try {
+                        checkCommits();
+                    } catch (Exception e) {
+                        System.err.println("Error in commit checker task: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }
+            },
+            COMMIT_CHECK_INTERVAL,
+            COMMIT_CHECK_INTERVAL,
+            TimeUnit.MILLISECONDS
+        );
     }
 
     private void resetElectionTimeout() {
-        // Cancel any existing election timeout
-        if (electionTimeoutTask != null) {
-            electionTimeoutTask.cancel(false);
+        if (!isRunning) {
+            return;
         }
 
-        // Only reset election timeout if not leader
-        if (state != State.LEADER) {
-            // Schedule new election timeout with randomized delay
-            int timeout = BASE_ELECTION_TIMEOUT + random.nextInt(ELECTION_TIMEOUT_RANGE);
-            electionTimeoutTask = scheduler.schedule(
+        synchronized (stateLock) {
+            cancelTask(electionTimeout);
+            
+            if (!scheduler.isShutdown()) {
+                long timeout = BASE_ELECTION_TIMEOUT + random.nextInt((int)ELECTION_TIMEOUT_RANGE);
+                electionTimeout = scheduler.schedule(
                     this::startElection,
                     timeout,
-                    TimeUnit.MILLISECONDS);
+                    TimeUnit.MILLISECONDS
+                );
+            }
         }
     }
 
     private void startElection() {
-        lock.lock();
-        try {
-            if (!isRunning.get()) return;
+        synchronized (stateLock) {
+            if (!isRunning) return;
             
             currentTerm++;
             state = State.CANDIDATE;
-            votedFor = id;
+            votedFor = nodeId;
+            persistState();  // Persist state change immediately
+            
+            int lastLogIndex = log.getLastLogIndex();
+            int lastLogTerm = log.getLastLogTerm();
             int votesReceived = 1;
             
-            System.out.println("Node " + id + " starting election for term " + currentTerm);
+            System.out.println("Node " + nodeId + " starting election for term " + currentTerm);
             
-            // Request votes from peers
-            for (RaftNode peer : cluster) {
-                if (peer.getId() == this.id) continue;
+            // Use CompletableFuture to handle votes asynchronously
+            List<CompletableFuture<Boolean>> voteFutures = new ArrayList<>();
+            
+            for (RaftNode peer : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+                if (peer.getId().equals(this.nodeId)) continue;
                 
+                CompletableFuture<Boolean> voteFuture = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        if (!isRunning) return false;
+                        return peer.requestVote(nodeId, currentTerm, lastLogIndex, lastLogTerm);
+                    } catch (Exception e) {
+                        System.err.println("Error requesting vote from Node " + peer.getId() + ": " + e.getMessage());
+                        return false;
+                    }
+                }, scheduler);
+                
+                voteFutures.add(voteFuture);
+            }
+            
+            // Wait for all votes or until we have a majority
+            for (CompletableFuture<Boolean> future : voteFutures) {
                 try {
-                    if (peer.requestVote(id, currentTerm)) {
+                    if (future.get(ELECTION_TIMEOUT_RANGE, TimeUnit.MILLISECONDS)) {
                         votesReceived++;
-                        System.out.println("Node " + id + " received vote from Node " + peer.getId());
+                        if (votesReceived > (cluster != null ? cluster.getNodes().size() : 0) / 2) {
+                            break;
+                        }
                     }
                 } catch (Exception e) {
-                    System.err.println("Error requesting vote from Node " + peer.getId() + ": " + e.getMessage());
+                    // Timeout or other error, continue with other votes
                 }
             }
             
-            // If we got majority of votes, become leader
-            if (votesReceived > cluster.size() / 2) {
-                System.out.println("Node " + id + " won election with " + votesReceived + " votes");
+            // Check if we're still a candidate and in the same term
+            if (state == State.CANDIDATE && votesReceived > (cluster != null ? cluster.getNodes().size() : 0) / 2) {
+                System.out.println("Node " + nodeId + " won election with " + votesReceived + " votes");
                 becomeLeader();
             } else {
-                System.out.println("Node " + id + " lost election with only " + votesReceived + " votes");
+                System.out.println("Node " + nodeId + " lost election with only " + votesReceived + " votes");
                 becomeFollower();
             }
-        } finally {
-            lock.unlock();
         }
     }
 
-    public boolean handleVoteRequest(int candidateId, int term, int lastLogIndex, int lastLogTerm) {
+    public boolean handleVoteRequest(String candidateId, int term, int lastLogIndex, int lastLogTerm) {
         if (term < currentTerm) {
             return false;
         }
 
         if (term > currentTerm) {
             currentTerm = term;
-            votedFor = -1;
+            votedFor = null;
             becomeFollower();
         }
 
-        if ((votedFor == -1 || votedFor == candidateId) &&
+        if ((votedFor == null || votedFor.equals(candidateId)) &&
                 isLogUpToDate(lastLogIndex, lastLogTerm)) {
             votedFor = candidateId;
             resetElectionTimeout();
@@ -172,126 +276,167 @@ public class RaftNode {
     }
 
     public void becomeLeader() {
-        lock.lock();
-        try {
-            if (state == State.LEADER) {
-                return;  
-            }
-            
+        if (!isRunning) return;
+        
+        synchronized (stateLock) {
+            System.out.println("Node " + nodeId + " became leader for term " + currentTerm);
             state = State.LEADER;
-            System.out.println("Node " + id + " became leader for term " + currentTerm);
+            leaderId = nodeId;
             
-            // Init leader state
-            nextIndex = new int[cluster.size()];
-            matchIndex = new int[cluster.size()];
-            
-            // Set nextIndex for each server
+            // Initialize leader state
             int lastLogIndex = log.getLastLogIndex();
-            for (int i = 0; i < cluster.size(); i++) {
-                nextIndex[i] = lastLogIndex + 1;
-                matchIndex[i] = 0;
+            for (RaftNode peer : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+                nextIndex.put(peer.getId(), lastLogIndex + 1);
+                matchIndex.put(peer.getId(), 0);
             }
             
-            matchIndex[id] = lastLogIndex;
+            // Cancel election timeout and start heartbeat
+            cancelTask(electionTimeout);
+            startHeartbeat();
             
-            // Cancel election timeout
-            if (electionTimeoutTask != null) {
-                electionTimeoutTask.cancel(false);
-                electionTimeoutTask = null;
-            }
-            
-            // Start sending heartbeats
-            heartbeatTask = scheduler.scheduleAtFixedRate(
-                () -> sendHeartbeat(),
-                0,
-                HEARTBEAT_INTERVAL,
-                TimeUnit.MILLISECONDS
-            );
-            
-            // Start commit checker
-            scheduler.scheduleAtFixedRate(
-                () -> checkCommits(),
-                COMMIT_CHECK_INTERVAL,
-                COMMIT_CHECK_INTERVAL,
-                TimeUnit.MILLISECONDS
-            );
-            
-            sendHeartbeat();
-        } finally {
-            lock.unlock();
+            persistState();
         }
     }
 
     public void becomeFollower() {
-        lock.lock();
-        try {
-            if (state == State.FOLLOWER) {
-                return;  
+        if (!isRunning) return;
+        
+        synchronized (stateLock) {
+            if (state != State.FOLLOWER) {
+                System.out.println("Node " + nodeId + " became follower for term " + currentTerm);
+                state = State.FOLLOWER;
+                
+                // Cancel heartbeat if we were leader
+                cancelTask(heartbeatTask);
+                
+                // Reset election timeout
+                resetElectionTimeout();
+                
+                persistState();
             }
-            
-            state = State.FOLLOWER;
-            System.out.println("Node " + id + " became follower for term " + currentTerm);
-            
-            // Cancel heartbeat task if it exists
-            if (heartbeatTask != null) {
-                heartbeatTask.cancel(false);
-                heartbeatTask = null;
-            }
-            
-            resetElectionTimeout();
-        } finally {
-            lock.unlock();
         }
     }
 
-    public void becomeCandidate() {
-        lock.lock();
-        try {
-            if (state == State.CANDIDATE) {
-                return;  
-            }
+    public void appendCommand(LogEntry.Command command) {
+        if (!isLeader()) {
+            throw new IllegalStateException("Cannot append commands on non-leader node");
+        }
+        
+        synchronized (stateLock) {
+            LogEntry entry = new LogEntry(currentTerm, log.size(), command);
+            log.append(entry);
+            persistState(); // Persist after log append
             
-            state = State.CANDIDATE;
-            System.out.println("Node " + id + " became candidate for term " + (currentTerm + 1));
-            
-            // Cancel heartbeat task if it exists
-            if (heartbeatTask != null) {
-                heartbeatTask.cancel(false);
-                heartbeatTask = null;
+            // Replicate to followers
+            for (RaftNode follower : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+                if (follower.getId().equals(this.nodeId)) {
+                    continue;
+                }
+                replicateToFollower(follower);
             }
-        } finally {
-            lock.unlock();
+        }
+    }
+
+    private void setCurrentTermAndVotedFor(int term, String votedFor) {
+        this.currentTerm = term;
+        this.votedFor = votedFor;
+        persistState();
+    }
+
+    public AppendEntriesResult appendEntries(int term, String leaderId, int prevLogIndex, int prevLogTerm,
+                                          List<LogEntry> entries, int leaderCommit) {
+        synchronized (stateLock) {
+            if (term < currentTerm) {
+                return new AppendEntriesResult(currentTerm, false);
+            }
+
+            if (term > currentTerm) {
+                setCurrentTermAndVotedFor(term, null);
+                becomeFollower();
+            }
+
+            this.leaderId = leaderId;
+            resetElectionTimeout();
+
+            // Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+            if (prevLogIndex >= 0) {
+                if (log.size() <= prevLogIndex) {
+                    return new AppendEntriesResult(currentTerm, false);
+                }
+                if (log.getEntry(prevLogIndex).term() != prevLogTerm) {
+                    return new AppendEntriesResult(currentTerm, false);
+                }
+            }
+
+            // If an existing entry conflicts with a new one (same index but different terms),
+            // delete the existing entry and all that follow it
+            for (int i = 0; i < entries.size(); i++) {
+                int index = prevLogIndex + 1 + i;
+                if (index < log.size()) {
+                    if (log.getEntry(index).term() != entries.get(i).term()) {
+                        // Delete conflicting entry and all that follow
+                        while (log.size() > index) {
+                            log.removeLast();
+                        }
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Append any new entries not already in the log
+            for (int i = 0; i < entries.size(); i++) {
+                int index = prevLogIndex + 1 + i;
+                if (index >= log.size()) {
+                    log.append(entries.get(i));
+                }
+            }
+
+            // Update commit index if leader commit is greater than local commit
+            if (leaderCommit > commitIndex) {
+                commitIndex = Math.min(leaderCommit, log.size() - 1);
+                applyCommittedEntries();
+            }
+
+            persistState();
+            return new AppendEntriesResult(currentTerm, true);
+        }
+    }
+
+    private void cancelTask(ScheduledFuture<?> task) {
+        if (task != null) {
+            task.cancel(false);
         }
     }
 
     public void sendHeartbeat() {
-        if (state != State.LEADER || !isRunning.get()) {
+        if (state != State.LEADER || !isRunning) {
             return;
         }
 
-        for (int i = 0; i < cluster.size(); i++) {
-            RaftNode follower = cluster.get(i);
-            if (follower.getId() == this.id) {
+        for (RaftNode follower : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+            if (follower.getId().equals(this.nodeId)) {
                 continue;
             }
 
-            int prevLogIndex = nextIndex[i] - 1;
+            int prevLogIndex = nextIndex.get(follower.getId()) - 1;
             int prevLogTerm = prevLogIndex >= 0 ? log.getEntry(prevLogIndex).term() : 0;
             List<LogEntry> entries = new ArrayList<>();
             
             // Include any missing entries
-            for (int j = nextIndex[i]; j <= log.getLastLogIndex(); j++) {
+            for (int j = nextIndex.get(follower.getId()); j <= log.getLastLogIndex(); j++) {
                 entries.add(log.getEntry(j));
             }
 
             // Only log when actually sending entries
             if (!entries.isEmpty()) {
-                System.out.println("Leader " + id + " sending " + entries.size() + " entries to Node " + follower.getId());
+                System.out.println("Leader " + nodeId + " sending " + entries.size() + " entries to Node " + follower.getId());
             }
 
             AppendEntriesResult result = follower.appendEntries(
                     currentTerm,
-                    id,
+                    nodeId,
                     prevLogIndex,
                     prevLogTerm,
                     entries,
@@ -300,24 +445,24 @@ public class RaftNode {
 
             if (result.success()) {
                 if (!entries.isEmpty()) {
-                    nextIndex[i] = prevLogIndex + entries.size() + 1;
-                    matchIndex[i] = prevLogIndex + entries.size();
+                    nextIndex.put(follower.getId(), prevLogIndex + entries.size() + 1);
+                    matchIndex.put(follower.getId(), prevLogIndex + entries.size());
                     System.out.println("Successfully replicated " + entries.size() + " entries to Node " + follower.getId() + 
-                                     " (nextIndex=" + nextIndex[i] + ", matchIndex=" + matchIndex[i] + ")");
+                                     " (nextIndex=" + nextIndex.get(follower.getId()) + ", matchIndex=" + matchIndex.get(follower.getId()) + ")");
                     
                     // Try to advance commit index
-                    int lastNewEntry = matchIndex[i];
+                    int lastNewEntry = matchIndex.get(follower.getId());
                     int replicationCount = 1; 
-                    for (int j = 0; j < cluster.size(); j++) {
-                        if (j != id && matchIndex[j] >= lastNewEntry) {
+                    for (RaftNode peer : cluster != null ? cluster.getNodes() : new ArrayList<>()) {
+                        if (!peer.getId().equals(nodeId) && matchIndex.get(peer.getId()) >= lastNewEntry) {
                             replicationCount++;
                         }
                     }
                     
-                    if (replicationCount > cluster.size() / 2 && lastNewEntry > commitIndex) {
+                    if (replicationCount > (cluster != null ? cluster.getNodes().size() : 0) / 2 && lastNewEntry > commitIndex) {
                         LogEntry entry = log.getEntry(lastNewEntry);
                         if (entry != null && entry.term() == currentTerm) {
-                            System.out.println("Leader " + id + " advancing commit index to " + lastNewEntry);
+                            System.out.println("Leader " + nodeId + " advancing commit index to " + lastNewEntry);
                             commitIndex = lastNewEntry;
                             applyCommittedEntries();
                         }
@@ -329,224 +474,57 @@ public class RaftNode {
                     becomeFollower();
                     break;
                 } else {
-                    nextIndex[i] = Math.max(0, nextIndex[i] - 1);
+                    nextIndex.put(follower.getId(), Math.max(0, nextIndex.get(follower.getId()) - 1));
                 }
             }
         }
     }
 
-    public AppendEntriesResult appendEntries(int term, int leaderId, int prevLogIndex, int prevLogTerm,
-                                      List<LogEntry> entries, int leaderCommit) {
-        if (term < currentTerm) {
-            return new AppendEntriesResult(currentTerm, false);
-        }
-
-        if (term > currentTerm) {
-            currentTerm = term;
-            votedFor = -1;
-            becomeFollower();
-        }
-
-        resetElectionTimeout();
-        this.leaderId = leaderId;
-
-        // Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-        if (prevLogIndex >= 0) {
-            LogEntry prevEntry = log.getEntry(prevLogIndex);
-            if (prevEntry == null || prevEntry.term() != prevLogTerm) {
-                System.out.println("Node " + id + " rejecting append: term mismatch at prevLogIndex " + prevLogIndex);
-                return new AppendEntriesResult(currentTerm, false);
-            }
-        }
-
-        // If an existing entry conflicts with a new one (same index but different terms),
-        // delete the existing entry and all that follow it
-        for (int i = 0; i < entries.size(); i++) {
-            int index = prevLogIndex + 1 + i;
-            LogEntry existing = log.getEntry(index);
-            if (existing != null && existing.term() != entries.get(i).term()) {
-                System.out.println("Node " + id + " truncating log from index " + index);
-                log.truncateFrom(index);
-                break;
-            }
-        }
-
-        // Append any new entries not already in the log
-        if (!entries.isEmpty()) {
-            System.out.println("Node " + id + " appending " + entries.size() + " entries starting at index " + (prevLogIndex + 1));
-            log.appendEntries(entries, prevLogIndex);
-        }
-
-        // Update commit index if leader commit is greater than local commit index
-        if (leaderCommit > commitIndex) {
-            commitIndex = Math.min(leaderCommit, log.getLastLogIndex());
-            System.out.println("Node " + id + " updating commitIndex to " + commitIndex);
-            applyCommittedEntries();
-        }
-
-        return new AppendEntriesResult(currentTerm, true);
-    }
-
-    private void applyCommittedEntries() {
-        lock.lock();
-        try {
-            if (lastApplied < commitIndex) {
-                System.out.println("Node " + id + " applying entries from index " + (lastApplied + 1) + " to " + commitIndex);
-                for (int i = lastApplied + 1; i <= commitIndex; i++) {
-                    LogEntry entry = log.getEntry(i);
-                    if (entry != null) {
-                        System.out.println("Node " + id + " applying command: " + entry.command());
-                        stateMachine.apply(entry.command());
-                        lastApplied = i;
-                    }
+    private void checkCommits() {
+        if (commitIndex > lastApplied) {
+            for (int i = lastApplied + 1; i <= commitIndex; i++) {
+                LogEntry entry = log.getEntry(i);
+                if (entry != null) {
+                    stateMachine.apply(entry.getCommand());
+                    lastApplied = i;
                 }
             }
-        } finally {
-            lock.unlock();
+            persistState();
         }
     }
 
-    public void appendCommand(LogEntry.Command command) throws IllegalStateException {
-        lock.lock();
-        try {
-            if (state != State.LEADER) {
-                throw new IllegalStateException("Commands can only be appended through the leader. Current leader is node " + leaderId);
+    public void applyCommittedEntries() {
+        synchronized (stateLock) {
+            while (commitIndex > lastApplied) {
+                lastApplied++;
+                LogEntry entry = log.getEntry(lastApplied);
+                stateMachine.apply(entry.getCommand());
             }
-            
-            System.out.println("Leader " + id + " appending command: " + command.operation());
-            int nextIndex = log.getLastLogIndex() + 1;
-            LogEntry entry = new LogEntry(currentTerm, nextIndex, command);
-            log.append(entry);
-            
-            // Force immediate replication
-            sendHeartbeat();
-            
-            // Update commit index
-            updateCommitIndex();
-        } catch (Exception e) {
-            System.err.println("Error appending command: " + e.getMessage());
-            throw new IllegalStateException("Failed to append command", e);
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private void updateCommitIndex() {
-        if (state != State.LEADER) {
-            return;
-        }
-
-        int lastIndex = log.getLastLogIndex();
-        for (int n = commitIndex + 1; n <= lastIndex; n++) {
-            LogEntry entry = log.getEntry(n);
-            if (entry == null || entry.term() != currentTerm) {
-                continue;
-            }
-
-            int replicationCount = 1; 
-            for (int i = 0; i < cluster.size(); i++) {
-                if (i != id && matchIndex[i] >= n) {
-                    replicationCount++;
-                }
-            }
-
-            if (replicationCount > cluster.size() / 2) {
-                System.out.println("Leader " + id + " advancing commit index from " + commitIndex + " to " + n);
-                commitIndex = n;
-                applyCommittedEntries();
-            }
-        }
-    }
-
-    public void checkCommits() {
-        updateCommitIndex();
-    }
-
-    public int getId() {
-        return id;
-    }
-
-    public int getCurrentTerm() {
-        return currentTerm;
-    }
-
-    public void setCurrentTerm(int term) {
-        this.currentTerm = term;
-    }
-
-    public int getVotedFor() {
-        return votedFor;
-    }
-
-    public void setVotedFor(int nodeId) {
-        this.votedFor = nodeId;
-    }
-
-    public Log getLog() {
-        return log;
-    }
-
-    public int getCommitIndex() {
-        return commitIndex;
-    }
-
-    public void setCommitIndex(int index) {
-        this.commitIndex = index;
-    }
-
-    public void receiveLogEntries(List<LogEntry> entries) {
-        if (entries == null || entries.isEmpty()) {
-            return;
-        }
-        log.appendEntries(entries, log.getLastLogIndex());
-    }
-
-    public boolean requestVote(int candidateId, int term) {
-        lock.lock();
-        try {
-            if (term < currentTerm) {
-                return false;
-            }
-            
-            if (term > currentTerm) {
-                currentTerm = term;
-                votedFor = -1;
-                becomeFollower();
-            }
-            
-            // If we haven't voted for anyone in this term or we've already voted for this candidate
-            if (votedFor == -1 || votedFor == candidateId) {
-                votedFor = candidateId;
-                resetElectionTimeout();
-                System.out.println("Node " + id + " voted for Node " + candidateId + " in term " + term);
-                return true;
-            }
-            
-            return false;
-        } finally {
-            lock.unlock();
         }
     }
 
     public void stop() {
-        isRunning.set(false);
-        
-        // Cancel any existing tasks
-        if (electionTimeoutTask != null) {
-            electionTimeoutTask.cancel(true);
-            electionTimeoutTask = null;
-        }
-        if (heartbeatTask != null) {
-            heartbeatTask.cancel(true);
+        synchronized (stateLock) {
+            isRunning = false;
+            
+            // Cancel all scheduled tasks first
+            cancelTask(electionTimeout);
+            cancelTask(heartbeatTask);
+            
+            electionTimeout = null;
             heartbeatTask = null;
-        }
-        
-        // Shutdown scheduler
-        scheduler.shutdownNow();
-        try {
-            scheduler.awaitTermination(1, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            
+            // Shutdown the scheduler gracefully
+            scheduler.shutdown();
+            try {
+                if (!scheduler.awaitTermination(1, TimeUnit.SECONDS)) {
+                    scheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                scheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+            
         }
     }
 
@@ -558,31 +536,130 @@ public class RaftNode {
         return stateMachine;
     }
 
-    public void setCluster(RaftCluster cluster) {
-        if (cluster == null) {
-            throw new IllegalArgumentException("Cluster cannot be null");
-        }
-        
-        lock.lock();
-        try {
-            this.cluster = new ArrayList<>(cluster.getNodes());
-            synchronized (this) {
-                this.nextIndex = new int[this.cluster.size()];
-                this.matchIndex = new int[this.cluster.size()];
-                for (int i = 0; i < this.cluster.size(); i++) {
-                    nextIndex[i] = log.getLastLogIndex() + 1;
-                    matchIndex[i] = 0;
+    public void updateClusterConfiguration(RaftCluster newCluster) {
+        synchronized (stateLock) {
+            // Instead of reassigning final variables, we'll clear and add new elements
+            cluster = newCluster;
+            
+            // Update nextIndex and matchIndex maps
+            Map<String, Integer> newNextIndex = new HashMap<>();
+            Map<String, Integer> newMatchIndex = new HashMap<>();
+            
+            // Copy existing values for nodes that are still in the cluster
+            for (RaftNode node : newCluster.getNodes()) {
+                String oldId = findNodeId(node.getId());
+                if (oldId != null) {
+                    newNextIndex.put(node.getId(), nextIndex.get(oldId));
+                    newMatchIndex.put(node.getId(), matchIndex.get(oldId));
+                } else {
+                    newNextIndex.put(node.getId(), log.getLastLogIndex() + 1);
+                    newMatchIndex.put(node.getId(), 0);
                 }
             }
-        } finally {
-            lock.unlock();
+            
+            nextIndex.clear();
+            nextIndex.putAll(newNextIndex);
+            matchIndex.clear();
+            matchIndex.putAll(newMatchIndex);
+            
+            persistState();
+        }
+    }
+    
+    private String findNodeId(String nodeId) {
+        for (String id : nextIndex.keySet()) {
+            if (id.equals(nodeId)) {
+                return id;
+            }
+        }
+        return null;
+    }
+
+    public void startHeartbeat() {
+        if (heartbeatTask != null) {
+            heartbeatTask.cancel(false);
+        }
+        heartbeatTask = scheduler.scheduleAtFixedRate(
+            this::sendHeartbeat,
+            0,
+            HEARTBEAT_INTERVAL,
+            TimeUnit.MILLISECONDS
+        );
+    }
+
+    private void replicateToFollower(RaftNode follower) {
+        int nextIdx = nextIndex.get(follower.getId());
+        int prevLogIndex = nextIdx - 1;
+        int prevLogTerm = prevLogIndex < 0 ? 0 : log.getEntry(prevLogIndex).term();
+        
+        List<LogEntry> entries = new ArrayList<>();
+        for (int i = nextIdx; i < log.size(); i++) {
+            entries.add(log.getEntry(i));
+        }
+        
+        AppendEntriesResult result = follower.appendEntries(
+            currentTerm,
+            nodeId,
+            prevLogIndex,
+            prevLogTerm,
+            entries,
+            commitIndex
+        );
+        
+        if (result.success()) {
+            if (!entries.isEmpty()) {
+                nextIndex.put(follower.getId(), nextIdx + entries.size());
+                matchIndex.put(follower.getId(), nextIdx + entries.size() - 1);
+            }
+        } else {
+            if (result.term() > currentTerm) {
+                setCurrentTermAndVotedFor(result.term(), null);
+                becomeFollower();
+            } else {
+                nextIndex.put(follower.getId(), nextIndex.get(follower.getId()) - 1);
+            }
         }
     }
 
-    public enum State {
-        FOLLOWER,
-        CANDIDATE,
-        LEADER
+    public VoteResult requestVote(int candidateTerm, String candidateId, int lastLogIndex, int lastLogTerm) {
+        synchronized (stateLock) {
+            if (candidateTerm < currentTerm) {
+                return new VoteResult(currentTerm, false);
+            }
+
+            if (candidateTerm > currentTerm) {
+                currentTerm = candidateTerm;
+                votedFor = null;
+                becomeFollower();
+            }
+
+            if ((votedFor == null || votedFor.equals(candidateId)) && isLogUpToDate(lastLogIndex, lastLogTerm)) {
+                votedFor = candidateId;
+                persistState();
+                resetElectionTimeout();
+                return new VoteResult(currentTerm, true);
+            }
+
+            return new VoteResult(currentTerm, false);
+        }
+    }
+
+    public class VoteResult {
+        private final int term;
+        private final boolean voteGranted;
+
+        public VoteResult(int term, boolean voteGranted) {
+            this.term = term;
+            this.voteGranted = voteGranted;
+        }
+
+        public int term() {
+            return term;
+        }
+
+        public boolean voteGranted() {
+            return voteGranted;
+        }
     }
 }
 
